@@ -1,0 +1,15 @@
+{
+  "name": "escrow-bot",
+  "version": "1.0.0",
+  "description": "LTC Escrow Bot for Discord",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "@discordjs/rest": "^2.3.0",
+    "discord-api-types": "^0.37.83",
+    "axios": "^1.6.7"
+  }
+}
