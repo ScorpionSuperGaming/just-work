@@ -8,7 +8,6 @@ const {
 const { REST } = require('@discordjs/rest');
 const { Routes } = require('discord-api-types/v10');
 const axios = require('axios');
-const crypto = require('crypto');
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const BOT_TOKEN       = process.env.BOT_TOKEN;
@@ -16,6 +15,19 @@ const CLIENT_ID       = process.env.CLIENT_ID;
 const BLOCKCYPHER_KEY = process.env.BLOCKCYPHER_KEY;
 const ADMIN_ROLE_ID   = process.env.ADMIN_ROLE_ID;
 const FEE_PERCENT     = parseFloat(process.env.FEE_PERCENT || '1');
+
+// ── THEME ─────────────────────────────────────────────────────────────────────
+const COLORS = {
+  primary:  0x00FF41,  // neon green
+  gold:     0xFFD700,
+  dark:     0x0D0D0D,
+  success:  0x00FF41,
+  warning:  0xFFD700,
+  danger:   0xFF3131,
+  complete: 0x00FF41,
+};
+
+const DIVIDER = '▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬';
 
 // ── TRADE STORE ───────────────────────────────────────────────────────────────
 const trades = {};
@@ -34,7 +46,7 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName('setup')
-    .setDescription('Post the New Trade button in this channel')
+    .setDescription('Post the Imu Escrow panel in this channel')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ];
 
@@ -49,6 +61,10 @@ async function registerCommands() {
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 function generateTradeId() {
   return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function timestamp() {
+  return `<t:${Math.floor(Date.now() / 1000)}:F>`;
 }
 
 async function generateLTCAddress() {
@@ -84,15 +100,206 @@ async function sendLTC(fromPrivateKey, fromAddress, toAddress, amountLTC) {
 
 async function resolveUser(guild, input) {
   input = input.trim();
-  // Try mention
   const mentionMatch = input.match(/^<@!?(\d+)>$/);
   if (mentionMatch) return guild.members.fetch(mentionMatch[1]).catch(() => null);
-  // Try raw ID
   if (/^\d{15,20}$/.test(input)) return guild.members.fetch(input).catch(() => null);
-  // Try username
   const members = await guild.members.fetch({ query: input, limit: 1 }).catch(() => null);
   if (members && members.size > 0) return members.first();
   return null;
+}
+
+// ── EMBEDS ────────────────────────────────────────────────────────────────────
+
+function mainPanelEmbed() {
+  return new EmbedBuilder()
+    .setColor(COLORS.primary)
+    .setTitle('◈  I M U  E S C R O W')
+    .setDescription(
+      '```\n' +
+      '  Premium Litecoin Escrow Service\n' +
+      '```\n' +
+      DIVIDER + '\n\n' +
+      '> 🔐  **Every trade gets a unique LTC address**\n' +
+      '> ⚡  **Payments detected automatically on-chain**\n' +
+      '> 💸  **Funds released directly to receiver\'s wallet**\n' +
+      '> 🔒  **Private channels — only you & your trader**\n\n' +
+      DIVIDER + '\n\n' +
+      '**How it works:**\n' +
+      '`①` Click **Open Trade** below\n' +
+      '`②` Fill in your trader\'s info & amount\n' +
+      '`③` Select your role in the private ticket\n' +
+      '`④` Send LTC — bot confirms automatically\n' +
+      '`⑤` Release funds & receiver gets paid instantly'
+    )
+    .setImage('https://i.imgur.com/placeholder.png')
+    .setFooter({ text: '◈ Imu Escrow  •  Secure  •  Automated  •  Trusted' })
+    .setTimestamp();
+}
+
+function ticketWelcomeEmbed(tradeId, creatorId, traderId, youGiving, theyGiving, amount) {
+  const fee = (amount * FEE_PERCENT / 100).toFixed(6);
+  const receiverGets = (amount - parseFloat(fee)).toFixed(6);
+  return new EmbedBuilder()
+    .setColor(COLORS.primary)
+    .setTitle(`◈  TRADE  #ltc-${tradeId}`)
+    .setDescription(
+      '```\n  New Escrow Session Initialized\n```\n' +
+      DIVIDER + '\n\n' +
+      `> 👤  **Trader 1:** <@${creatorId}>\n` +
+      `> 👤  **Trader 2:** <@${traderId}>\n\n` +
+      DIVIDER
+    )
+    .addFields(
+      {
+        name: '📦  TRADE DETAILS',
+        value:
+          `> <@${creatorId}> is giving **${youGiving}**\n` +
+          `> <@${traderId}> is giving **${theyGiving}**`,
+        inline: false,
+      },
+      {
+        name: '💎  LTC IN ESCROW',
+        value: `\`\`\`${amount} LTC\`\`\``,
+        inline: true,
+      },
+      {
+        name: '🤝  RECEIVER GETS',
+        value: `\`\`\`${receiverGets} LTC\`\`\``,
+        inline: true,
+      },
+      {
+        name: '📋  SERVICE FEE',
+        value: `\`\`\`${fee} LTC (${FEE_PERCENT}%)\`\`\``,
+        inline: true,
+      },
+      {
+        name: '\u200b',
+        value:
+          DIVIDER + '\n' +
+          '**Both parties must select their role below to begin.**\n\n' +
+          '🟢  `I am Sending` — You will send LTC to escrow\n' +
+          '🔵  `I am Receiving` — You will receive LTC after release',
+        inline: false,
+      },
+    )
+    .setFooter({ text: `◈ Imu Escrow  •  Trade ID: ltc-${tradeId}  •  ${new Date().toUTCString()}` });
+}
+
+function awaitingPaymentEmbed(tradeId, address, amount, senderId, receiverId) {
+  const fee = (amount * FEE_PERCENT / 100).toFixed(6);
+  const receiverGets = (amount - parseFloat(fee)).toFixed(6);
+  return new EmbedBuilder()
+    .setColor(COLORS.warning)
+    .setTitle('◈  AWAITING PAYMENT')
+    .setDescription(
+      '```\n  Roles Confirmed — Send LTC to Begin\n```\n' +
+      DIVIDER + '\n\n' +
+      `> 🟢  **Sender:** <@${senderId}>\n` +
+      `> 🔵  **Receiver:** <@${receiverId}>\n\n` +
+      DIVIDER
+    )
+    .addFields(
+      {
+        name: '📬  SEND EXACTLY THIS AMOUNT',
+        value: `\`\`\`${amount} LTC\`\`\``,
+        inline: false,
+      },
+      {
+        name: '🏦  TO THIS LTC ADDRESS',
+        value: `\`\`\`${address}\`\`\``,
+        inline: false,
+      },
+      {
+        name: '🤝  RECEIVER GETS',
+        value: `\`${receiverGets} LTC\``,
+        inline: true,
+      },
+      {
+        name: '📋  FEE',
+        value: `\`${fee} LTC\``,
+        inline: true,
+      },
+      {
+        name: '\u200b',
+        value:
+          DIVIDER + '\n' +
+          '⚠️  Send **exactly** the amount shown above.\n' +
+          '🔄  Bot checks for payment every **30 seconds**.\n' +
+          '⏰  Trade expires after **1 hour** if no payment received.',
+        inline: false,
+      },
+    )
+    .setFooter({ text: `◈ Imu Escrow  •  Trade #ltc-${tradeId}` });
+}
+
+function paymentConfirmedEmbed(tradeId, amount, senderId, receiverId) {
+  const fee = (amount * FEE_PERCENT / 100).toFixed(6);
+  const receiverGets = (amount - parseFloat(fee)).toFixed(6);
+  return new EmbedBuilder()
+    .setColor(COLORS.success)
+    .setTitle('◈  PAYMENT CONFIRMED  ✅')
+    .setDescription(
+      '```\n  Funds Secured in Escrow\n```\n' +
+      DIVIDER + '\n\n' +
+      `> ✅  **${amount} LTC** received on-chain\n` +
+      `> 🟢  **Sender:** <@${senderId}>\n` +
+      `> 🔵  **Receiver:** <@${receiverId}>\n\n` +
+      DIVIDER
+    )
+    .addFields(
+      {
+        name: '💸  READY TO RELEASE',
+        value: `\`\`\`${receiverGets} LTC → Receiver\`\`\``,
+        inline: false,
+      },
+      {
+        name: '\u200b',
+        value:
+          DIVIDER + '\n' +
+          `<@${senderId}> — When you are satisfied with the trade,\n` +
+          'press **Release Funds** to complete the transaction.\n\n' +
+          'If there is an issue, press **Open Dispute** for admin review.',
+        inline: false,
+      },
+    )
+    .setFooter({ text: `◈ Imu Escrow  •  Trade #ltc-${tradeId}` })
+    .setTimestamp();
+}
+
+function tradeCompleteEmbed(tradeId, receiverGets, receiverAddress, txHash, senderId, receiverId) {
+  return new EmbedBuilder()
+    .setColor(COLORS.complete)
+    .setTitle('◈  TRADE COMPLETE  🎉')
+    .setDescription(
+      '```\n  Transaction Executed Successfully\n```\n' +
+      DIVIDER + '\n\n' +
+      `> ✅  **${receiverGets} LTC** sent to receiver\n` +
+      `> 🟢  **Sender:** <@${senderId}>\n` +
+      `> 🔵  **Receiver:** <@${receiverId}>\n\n` +
+      DIVIDER
+    )
+    .addFields(
+      {
+        name: '📬  SENT TO ADDRESS',
+        value: `\`\`\`${receiverAddress}\`\`\``,
+        inline: false,
+      },
+      {
+        name: '🔗  TRANSACTION HASH',
+        value: `\`\`\`${txHash}\`\`\``,
+        inline: false,
+      },
+      {
+        name: '\u200b',
+        value:
+          DIVIDER + '\n' +
+          '> Thank you for using **Imu Escrow**.\n' +
+          '> Press **Close Ticket** to archive this channel.',
+        inline: false,
+      },
+    )
+    .setFooter({ text: `◈ Imu Escrow  •  Trade #ltc-${tradeId}  •  Completed` })
+    .setTimestamp();
 }
 
 // ── WATCH FOR PAYMENT ─────────────────────────────────────────────────────────
@@ -102,11 +309,21 @@ async function watchForPayment(tradeId) {
   let attempts = 0;
   const interval = setInterval(async () => {
     attempts++;
-    if (attempts > maxAttempts || !['awaiting_payment'].includes(trade.status)) {
+    if (attempts > maxAttempts || trade.status !== 'awaiting_payment') {
       clearInterval(interval);
       if (trade.status === 'awaiting_payment') {
         const ch = await client.channels.fetch(trade.channelId).catch(() => null);
-        if (ch) await ch.send('⏰ **Trade timed out.** No payment received within 1 hour.');
+        if (ch) {
+          await ch.send({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(COLORS.danger)
+                .setTitle('◈  TRADE EXPIRED  ⏰')
+                .setDescription('```\n  No payment received within 1 hour.\n  This trade has been cancelled.\n```')
+                .setFooter({ text: `◈ Imu Escrow  •  Trade #ltc-${tradeId}` })
+            ]
+          });
+        }
         trade.status = 'expired';
       }
       return;
@@ -118,22 +335,15 @@ async function watchForPayment(tradeId) {
         trade.status = 'funded';
         const ch = await client.channels.fetch(trade.channelId).catch(() => null);
         if (!ch) return;
-        const fee = (trade.amount * FEE_PERCENT / 100).toFixed(6);
-        const receiverGets = (trade.amount - parseFloat(fee)).toFixed(6);
-        const embed = new EmbedBuilder()
-          .setColor(0x2ECC71)
-          .setTitle('✅ Payment Confirmed!')
-          .setDescription(`**${trade.amount} LTC** received!\n\n<@${trade.senderId}> click **Release Funds** when you're happy with the trade.`)
-          .addFields(
-            { name: '🤝 Receiver will get', value: `${receiverGets} LTC`, inline: true },
-            { name: '📋 Fee', value: `${fee} LTC`, inline: true },
-          )
-          .setFooter({ text: 'Imu Escrow' });
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`release_${tradeId}`).setLabel('✅ Release Funds').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`dispute_${tradeId}`).setLabel('⚠️ Dispute').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(`release_${tradeId}`).setLabel('✅  Release Funds').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`dispute_${tradeId}`).setLabel('⚠️  Open Dispute').setStyle(ButtonStyle.Danger),
         );
-        await ch.send({ content: `<@${trade.senderId}> <@${trade.receiverId}>`, embeds: [embed], components: [row] });
+        await ch.send({
+          content: `<@${trade.senderId}> <@${trade.receiverId}>`,
+          embeds: [paymentConfirmedEmbed(tradeId, trade.amount, trade.senderId, trade.receiverId)],
+          components: [row],
+        });
       }
     } catch (e) { console.error('Balance check error:', e.message); }
   }, 30000);
@@ -141,7 +351,7 @@ async function watchForPayment(tradeId) {
 
 // ── READY ─────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`✅ Imu Escrow online as ${client.user.tag}`);
   await registerCommands();
 });
 
@@ -150,63 +360,56 @@ client.on(Events.InteractionCreate, async interaction => {
 
   // /setup
   if (interaction.isChatInputCommand() && interaction.commandName === 'setup') {
-    const embed = new EmbedBuilder()
-      .setColor(0x9B59B6)
-      .setTitle('💎 Imu Escrow')
-      .setDescription('Safe and fully automated LTC escrow service.\n\nClick below to start a new trade. A private ticket will be created for you and your trader.')
-      .addFields(
-        { name: '✅ Secure', value: 'Unique LTC address per trade', inline: true },
-        { name: '⚡ Automatic', value: 'Bot sends funds automatically', inline: true },
-        { name: '🔒 Private', value: 'Only you & your trader can see', inline: true },
-      )
-      .setFooter({ text: 'Imu Escrow • Powered by LTC' });
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('new_trade').setLabel('🔒 New Trade').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId('new_trade')
+        .setLabel('◈  Open Trade')
+        .setStyle(ButtonStyle.Success),
     );
-    await interaction.channel.send({ embeds: [embed], components: [row] });
-    await interaction.reply({ content: '✅ Done!', ephemeral: true });
+    await interaction.channel.send({ embeds: [mainPanelEmbed()], components: [row] });
+    await interaction.reply({ content: '✅ Escrow panel posted!', ephemeral: true });
     return;
   }
 
-  // "New Trade" button → show modal form
+  // Open Trade button → modal
   if (interaction.isButton() && interaction.customId === 'new_trade') {
     const modal = new ModalBuilder()
       .setCustomId('trade_form')
-      .setTitle('Start a New Trade');
-
-    const traderInput = new TextInputBuilder()
-      .setCustomId('trader_id')
-      .setLabel("Your Trader's Username or ID")
-      .setPlaceholder('e.g. darkimu or 123456789012345678')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
-
-    const givingInput = new TextInputBuilder()
-      .setCustomId('you_giving')
-      .setLabel('What are YOU giving?')
-      .setPlaceholder('e.g. 0.5 LTC')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
-
-    const receivingInput = new TextInputBuilder()
-      .setCustomId('they_giving')
-      .setLabel('What are THEY giving?')
-      .setPlaceholder('e.g. 50 USDT')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
-
-    const ltcAmountInput = new TextInputBuilder()
-      .setCustomId('ltc_amount')
-      .setLabel('LTC amount to escrow (numbers only)')
-      .setPlaceholder('e.g. 0.5')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
+      .setTitle('◈ Imu Escrow — New Trade');
 
     modal.addComponents(
-      new ActionRowBuilder().addComponents(traderInput),
-      new ActionRowBuilder().addComponents(givingInput),
-      new ActionRowBuilder().addComponents(receivingInput),
-      new ActionRowBuilder().addComponents(ltcAmountInput),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('trader_id')
+          .setLabel('Your Trader\'s Username or Discord ID')
+          .setPlaceholder('e.g. darkimu  or  123456789012345678')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('you_giving')
+          .setLabel('What are YOU giving?')
+          .setPlaceholder('e.g. 0.5 LTC')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('they_giving')
+          .setLabel('What are THEY giving?')
+          .setPlaceholder('e.g. 50 USDT')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('ltc_amount')
+          .setLabel('LTC Amount to Escrow (numbers only)')
+          .setPlaceholder('e.g. 0.5')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+      ),
     );
 
     await interaction.showModal(modal);
@@ -223,23 +426,21 @@ client.on(Events.InteractionCreate, async interaction => {
     const ltcAmount  = parseFloat(interaction.fields.getTextInputValue('ltc_amount'));
 
     if (isNaN(ltcAmount) || ltcAmount <= 0) {
-      return interaction.editReply({ content: '❌ Invalid LTC amount. Please use a number like `0.5`' });
+      return interaction.editReply({ content: '❌ Invalid LTC amount. Please enter a number like `0.5`' });
     }
 
-    // Resolve the other trader
     const traderMember = await resolveUser(interaction.guild, traderId);
     if (!traderMember) {
-      return interaction.editReply({ content: `❌ Could not find user **${traderId}** in this server. Make sure they are in the server and check the username/ID.` });
+      return interaction.editReply({ content: `❌ Could not find **${traderId}** in this server. Check the username or ID and try again.` });
     }
     if (traderMember.id === interaction.user.id) {
-      return interaction.editReply({ content: '❌ You cannot trade with yourself.' });
+      return interaction.editReply({ content: '❌ You cannot open a trade with yourself.' });
     }
 
     const tradeId = generateTradeId();
     const creator = interaction.user;
     const trader  = traderMember.user;
 
-    // Create private channel
     const channel = await interaction.guild.channels.create({
       name: `ltc-${tradeId}`,
       type: ChannelType.GuildText,
@@ -257,8 +458,7 @@ client.on(Events.InteractionCreate, async interaction => {
       traderId: trader.id,
       senderId: null,
       receiverId: null,
-      youGiving,
-      theyGiving,
+      youGiving, theyGiving,
       amount: ltcAmount,
       address: null,
       privateKey: null,
@@ -266,90 +466,74 @@ client.on(Events.InteractionCreate, async interaction => {
       funded: false,
     };
 
-    const fee = (ltcAmount * FEE_PERCENT / 100).toFixed(6);
-    const receiverGets = (ltcAmount - parseFloat(fee)).toFixed(6);
-
-    const welcomeEmbed = new EmbedBuilder()
-      .setColor(0x9B59B6)
-      .setTitle(`🔒 Trade #ltc-${tradeId}`)
-      .setDescription(`Welcome <@${creator.id}> and <@${trader.id}>!\n\nPlease select your roles below to begin the trade.`)
-      .addFields(
-        { name: '📦 Trade Details', value: `<@${creator.id}> gives: **${youGiving}**\n<@${trader.id}> gives: **${theyGiving}**` },
-        { name: '💎 LTC in Escrow', value: `${ltcAmount} LTC`, inline: true },
-        { name: '🤝 Receiver gets', value: `${receiverGets} LTC`, inline: true },
-        { name: '📋 Fee', value: `${fee} LTC (${FEE_PERCENT}%)`, inline: true },
-      )
-      .setFooter({ text: 'Imu Escrow • Both parties must select their role' });
-
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`role_sender_${tradeId}`).setLabel('🟢 I am Sending LTC').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`role_receiver_${tradeId}`).setLabel('🔵 I am Receiving LTC').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`cancel_${tradeId}`).setLabel('🔴 Cancel Trade').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`role_sender_${tradeId}`).setLabel('🟢  I am Sending LTC').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`role_receiver_${tradeId}`).setLabel('🔵  I am Receiving LTC').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`cancel_${tradeId}`).setLabel('✖  Cancel Trade').setStyle(ButtonStyle.Danger),
     );
 
-    await channel.send({ content: `<@${creator.id}> <@${trader.id}> — Trade created!`, embeds: [welcomeEmbed], components: [row] });
-    await interaction.editReply({ content: `✅ Trade ticket created: ${channel}` });
+    await channel.send({
+      content: `<@${creator.id}> <@${trader.id}>`,
+      embeds: [ticketWelcomeEmbed(tradeId, creator.id, trader.id, youGiving, theyGiving, ltcAmount)],
+      components: [row],
+    });
+
+    await interaction.editReply({ content: `✅ Trade ticket opened: ${channel}` });
     return;
   }
 
-  // Role buttons
+  // Role selection
   if (interaction.isButton() && interaction.customId.startsWith('role_')) {
     const parts = interaction.customId.split('_');
     const role = parts[1];
     const tradeId = parts[2];
     const trade = trades[tradeId];
     if (!trade) return interaction.reply({ content: '❌ Trade not found.', ephemeral: true });
-    if (trade.status !== 'selecting_roles') return interaction.reply({ content: '❌ Roles already locked in.', ephemeral: true });
+    if (trade.status !== 'selecting_roles') return interaction.reply({ content: '❌ Roles already locked.', ephemeral: true });
 
     const userId = interaction.user.id;
     if (userId !== trade.creatorId && userId !== trade.traderId) {
       return interaction.reply({ content: '❌ You are not part of this trade.', ephemeral: true });
     }
-
     if (role === 'sender') {
       if (trade.senderId === userId) return interaction.reply({ content: '❌ You already claimed Sender.', ephemeral: true });
       if (trade.receiverId === userId) return interaction.reply({ content: '❌ You already claimed Receiver.', ephemeral: true });
       trade.senderId = userId;
     }
-
     if (role === 'receiver') {
       if (trade.receiverId === userId) return interaction.reply({ content: '❌ You already claimed Receiver.', ephemeral: true });
       if (trade.senderId === userId) return interaction.reply({ content: '❌ You already claimed Sender.', ephemeral: true });
       trade.receiverId = userId;
     }
 
-    await interaction.reply({ content: `✅ <@${userId}> is the **${role === 'sender' ? '🟢 Sender' : '🔵 Receiver'}**!` });
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(role === 'sender' ? COLORS.success : 0x3498DB)
+          .setDescription(`> ${role === 'sender' ? '🟢' : '🔵'}  <@${userId}> has claimed the **${role === 'sender' ? 'Sender' : 'Receiver'}** role.`)
+      ]
+    });
 
     if (trade.senderId && trade.receiverId) {
       trade.status = 'generating_address';
-      const loadingMsg = await interaction.channel.send('⏳ Both roles confirmed! Generating your unique LTC address...');
+      const loadingMsg = await interaction.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(COLORS.primary)
+            .setDescription('```\n  ⚡ Generating unique LTC address...\n```')
+        ]
+      });
 
       try {
         const wallet = await generateLTCAddress();
         trade.address = wallet.address;
         trade.privateKey = wallet.privateKey;
         trade.status = 'awaiting_payment';
-
         await loadingMsg.delete().catch(() => {});
-
-        const fee = (trade.amount * FEE_PERCENT / 100).toFixed(6);
-        const receiverGets = (trade.amount - parseFloat(fee)).toFixed(6);
-
-        const payEmbed = new EmbedBuilder()
-          .setColor(0xF1C40F)
-          .setTitle(`⏳ Awaiting Payment — Trade #ltc-${tradeId}`)
-          .setDescription(`<@${trade.senderId}> please send **exactly ${trade.amount} LTC** to the address below.`)
-          .addFields(
-            { name: '🟢 Sender', value: `<@${trade.senderId}>`, inline: true },
-            { name: '🔵 Receiver', value: `<@${trade.receiverId}>`, inline: true },
-            { name: '💎 Amount', value: `${trade.amount} LTC`, inline: true },
-            { name: '📬 Send LTC here', value: `\`\`\`${wallet.address}\`\`\`` },
-            { name: '🤝 Receiver gets', value: `${receiverGets} LTC`, inline: true },
-            { name: '📋 Fee', value: `${fee} LTC`, inline: true },
-          )
-          .setFooter({ text: 'Imu Escrow • Payment checked every 30 seconds' });
-
-        await interaction.channel.send({ content: `<@${trade.senderId}> <@${trade.receiverId}>`, embeds: [payEmbed] });
+        await interaction.channel.send({
+          content: `<@${trade.senderId}> <@${trade.receiverId}>`,
+          embeds: [awaitingPaymentEmbed(tradeId, wallet.address, trade.amount, trade.senderId, trade.receiverId)],
+        });
         watchForPayment(tradeId);
       } catch (e) {
         trade.status = 'selecting_roles';
@@ -367,9 +551,20 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!trade) return interaction.reply({ content: '❌ Trade not found.', ephemeral: true });
     if (interaction.user.id !== trade.senderId) return interaction.reply({ content: '❌ Only the Sender can release funds.', ephemeral: true });
     if (trade.status !== 'funded') return interaction.reply({ content: '❌ Funds not confirmed yet.', ephemeral: true });
-
     trade.status = 'awaiting_receiver_address';
-    await interaction.reply({ content: `✅ Funds released by <@${trade.senderId}>!\n\n<@${trade.receiverId}> please type your **LTC wallet address** in this channel to receive your funds.` });
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLORS.primary)
+          .setTitle('◈  FUNDS RELEASED')
+          .setDescription(
+            '```\n  Sender has approved the trade.\n```\n' +
+            DIVIDER + '\n\n' +
+            `<@${trade.receiverId}> — Please type your **LTC wallet address** in this channel to receive your funds.`
+          )
+          .setFooter({ text: `◈ Imu Escrow  •  Trade #ltc-${tradeId}` })
+      ]
+    });
     return;
   }
 
@@ -383,7 +578,22 @@ client.on(Events.InteractionCreate, async interaction => {
     }
     trade.status = 'disputed';
     const adminPing = ADMIN_ROLE_ID ? `<@&${ADMIN_ROLE_ID}>` : '@Admin';
-    await interaction.reply({ content: `⚠️ **Dispute opened by <@${interaction.user.id}>!**\n${adminPing} please review this trade.` });
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLORS.danger)
+          .setTitle('◈  DISPUTE OPENED  ⚠️')
+          .setDescription(
+            '```\n  Admin Review Required\n```\n' +
+            DIVIDER + '\n\n' +
+            `> Dispute raised by <@${interaction.user.id}>\n` +
+            `> ${adminPing} please review this trade.\n\n` +
+            DIVIDER
+          )
+          .setFooter({ text: `◈ Imu Escrow  •  Trade #ltc-${tradeId}` })
+          .setTimestamp()
+      ]
+    });
     return;
   }
 
@@ -397,20 +607,34 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.reply({ content: '❌ You are not part of this trade.', ephemeral: true });
     }
     trade.status = 'cancelled';
-    await interaction.reply({ content: '🔴 Trade cancelled. Channel will be deleted in 5 seconds.' });
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLORS.danger)
+          .setTitle('◈  TRADE CANCELLED')
+          .setDescription('```\n  This trade has been cancelled.\n  Channel will be deleted in 5 seconds.\n```')
+          .setFooter({ text: `◈ Imu Escrow  •  Trade #ltc-${tradeId}` })
+      ]
+    });
     setTimeout(async () => { await interaction.channel.delete().catch(() => {}); }, 5000);
     return;
   }
 
   // Close ticket
   if (interaction.isButton() && interaction.customId.startsWith('close_')) {
-    await interaction.reply({ content: '🔒 Closing ticket in 5 seconds...' });
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLORS.primary)
+          .setDescription('```\n  🔒 Archiving ticket in 5 seconds...\n```')
+      ]
+    });
     setTimeout(async () => { await interaction.channel.delete().catch(() => {}); }, 5000);
     return;
   }
 });
 
-// ── MESSAGE HANDLER (receiver address) ───────────────────────────────────────
+// ── MESSAGE HANDLER ───────────────────────────────────────────────────────────
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot) return;
   const trade = Object.entries(trades).find(([, t]) => t.channelId === message.channel.id);
@@ -420,37 +644,40 @@ client.on(Events.MessageCreate, async message => {
   if (tradeData.status === 'awaiting_receiver_address' && message.author.id === tradeData.receiverId) {
     const receiverAddress = message.content.trim();
     if (!receiverAddress.match(/^[LM3][a-km-zA-HJ-NP-Z1-9]{25,34}$/) && !receiverAddress.startsWith('ltc1')) {
-      await message.reply('❌ That doesn\'t look like a valid LTC address. Please check and try again.');
+      await message.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(COLORS.danger)
+            .setDescription('> ❌  Invalid LTC address. Please check and try again.')
+        ]
+      });
       return;
     }
 
     tradeData.status = 'sending';
     const fee = tradeData.amount * FEE_PERCENT / 100;
     const receiverGets = tradeData.amount - fee;
-    const loadingMsg = await message.channel.send(`⏳ Sending **${receiverGets.toFixed(6)} LTC** to your wallet...`);
+
+    const loadingMsg = await message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLORS.primary)
+          .setDescription(`\`\`\`\n  ⚡ Sending ${receiverGets.toFixed(6)} LTC to your wallet...\n\`\`\``)
+      ]
+    });
 
     try {
       const txHash = await sendLTC(tradeData.privateKey, tradeData.address, receiverAddress, receiverGets);
       tradeData.status = 'complete';
       await loadingMsg.delete().catch(() => {});
 
-      const successEmbed = new EmbedBuilder()
-        .setColor(0x2ECC71)
-        .setTitle('🎉 Trade Complete!')
-        .setDescription(`**${receiverGets.toFixed(6)} LTC** has been sent to <@${tradeData.receiverId}>!`)
-        .addFields(
-          { name: '📬 Sent to', value: `\`${receiverAddress}\`` },
-          { name: '🔗 Transaction Hash', value: `\`${txHash}\`` },
-        )
-        .setFooter({ text: 'Imu Escrow • Thank you for using our service!' });
-
       const closeRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`close_${tradeId}`).setLabel('🔒 Close Ticket').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`close_${tradeId}`).setLabel('🔒  Close Ticket').setStyle(ButtonStyle.Secondary),
       );
 
       await message.channel.send({
         content: `<@${tradeData.senderId}> <@${tradeData.receiverId}>`,
-        embeds: [successEmbed],
+        embeds: [tradeCompleteEmbed(tradeId, receiverGets.toFixed(6), receiverAddress, txHash, tradeData.senderId, tradeData.receiverId)],
         components: [closeRow],
       });
     } catch (e) {
@@ -458,7 +685,19 @@ client.on(Events.MessageCreate, async message => {
       await loadingMsg.delete().catch(() => {});
       console.error('Send LTC error:', e.message);
       const adminPing = ADMIN_ROLE_ID ? `<@&${ADMIN_ROLE_ID}>` : '@Admin';
-      await message.channel.send(`❌ Auto-send failed. ${adminPing} please manually send **${receiverGets.toFixed(6)} LTC** to \`${receiverAddress}\`.`);
+      await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(COLORS.danger)
+            .setTitle('◈  AUTO-SEND FAILED')
+            .setDescription(
+              '```\n  Manual transfer required.\n```\n' +
+              DIVIDER + '\n\n' +
+              `${adminPing} please manually send **${receiverGets.toFixed(6)} LTC** to:\n\`\`\`${receiverAddress}\`\`\``
+            )
+            .setFooter({ text: `◈ Imu Escrow  •  Trade #ltc-${tradeId}` })
+        ]
+      });
     }
   }
 });
